@@ -8,24 +8,24 @@ public interface RemovalListener<K, V>
 	enum Cause
 	{
 		/**
-		 * removed by user code
+		 * removed by invoking a remove or clear method
 		 */
 		REMOVED,
 		/**
-		 * background worker reduced the size of cache
-		 */
-		REDUCED,
-		/**
-		 * removed because the entry time limit reached
+		 * removed because the entry access or write time expired
 		 */
 		EXPIRED,
 		/**
-		 * removed because the cache exceeded it's count limit
+		 * removed because the cache maximum count was exceeded
 		 */
 		COUNT,
 		/**
-		 * removed because the cache exceeded it's weight limit
+		 * removed because the cache maximum weight was exceeded
 		 */
-		WEIGHT
+		WEIGHT,
+		/**
+		 * replaced by invoking the put method
+		 */
+		REPLACED
 	}
 }

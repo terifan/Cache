@@ -4,10 +4,12 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.BiFunction;
 import org.terifan.util.cache.RemovalListener.Cause;
 
 
@@ -21,17 +23,17 @@ import org.terifan.util.cache.RemovalListener.Cause;
  */
 public class Cache<K, V>
 {
-	private static Timer mSharedTimer;
+	private static Timer GLOBAL_TIMER;
 
 	private final ReentrantReadWriteLock mLock;
 	private final LinkedHashMap<K, Entry<K, V>> mMap;
 	private RemovalListener<K, V> mRemovalListener;
-//	private ElementProvider<K, V> mElementProvider;
-	private long mTimeLimit;
-	private long mWeightLimit;
-	private long mCountLimit;
+	private BiFunction<K, V, Long> mWeighter;
+	private long mExpireAfterAccess;
+	private long mExpireAfterWrite;
+	private long mMaximumWeight;
+	private long mMaximumCount;
 	private long mWeight;
-	private boolean mReduceOverTime;
 	private TimerTask mTimerTask;
 
 
@@ -47,39 +49,20 @@ public class Cache<K, V>
 	/**
 	 * Constructs a Cache with a certain weight limit.
 	 *
-	 * @param aWeightLimit the maximum weight of this Cache.
+	 * @param aMaximumWeight the maximum weight of this Cache.
 	 */
-	public Cache(long aWeightLimit)
+	public Cache(long aMaximumWeight)
 	{
 		mLock = new ReentrantReadWriteLock();
 		mMap = new LinkedHashMap<>();
 
-		mTimeLimit = Long.MAX_VALUE;
-		mCountLimit = Long.MAX_VALUE;
-		mWeightLimit = Long.MAX_VALUE;
+		mExpireAfterAccess = Long.MAX_VALUE;
+		mExpireAfterWrite = Long.MAX_VALUE;
+		mMaximumCount = Long.MAX_VALUE;
+		mMaximumWeight = Long.MAX_VALUE;
+		mWeighter = (K,V) -> 1L;
 
-		mWeightLimit = aWeightLimit;
-	}
-
-
-	/**
-	 * @return if items are removed over time.
-	 */
-	public boolean isReduceOverTimeEnabled()
-	{
-		return mReduceOverTime;
-	}
-
-
-	/**
-	 * Enable the automatic removal of eldest element each time the background worker runs.
-	 *
-	 * @param aEnabled if the reducer should be enabled.
-	 */
-	public Cache<K, V> setReduceOverTimeEnabled(boolean aEnabled)
-	{
-		mReduceOverTime = aEnabled;
-		return this;
+		mMaximumWeight = aMaximumWeight;
 	}
 
 
@@ -95,9 +78,9 @@ public class Cache<K, V>
 
 		synchronized (Cache.class)
 		{
-			if (mSharedTimer == null)
+			if (GLOBAL_TIMER == null)
 			{
-				mSharedTimer = new Timer(true);
+				GLOBAL_TIMER = new Timer(true);
 			}
 		}
 		mLock.writeLock().lock();
@@ -110,24 +93,10 @@ public class Cache<K, V>
 					@Override
 					public void run()
 					{
-						if (shrinkImpl() == 0 && mReduceOverTime)
-						{
-							mLock.writeLock().lock();
-							try
-							{
-								if (!mMap.isEmpty())
-								{
-									removeImpl(mMap.keySet().iterator().next(), Cause.REDUCED);
-								}
-							}
-							finally
-							{
-								mLock.writeLock().unlock();
-							}
-						}
+						trim();
 					}
 				};
-				mSharedTimer.schedule(mTimerTask, aRate, aRate);
+				GLOBAL_TIMER.schedule(mTimerTask, aRate, aRate);
 			}
 		}
 		finally
@@ -157,19 +126,6 @@ public class Cache<K, V>
 		}
 		return this;
 	}
-
-
-//	public ElementProvider<K, V> getElementProvider()
-//	{
-//		return mElementProvider;
-//	}
-//
-//
-//	public Cache<K, V> setElementProvider(ElementProvider<K, V> aElementProvider)
-//	{
-//		mElementProvider = aElementProvider;
-//		return this;
-//	}
 
 
 	/**
@@ -208,14 +164,14 @@ public class Cache<K, V>
 
 
 	/**
-	 * @return the time limit of elements, default is Long.MAX_VALUE.
+	 * @return the access expiration time of elements, default is Long.MAX_VALUE.
 	 */
-	public long getTimeLimit()
+	public long getExpireAfterAccess()
 	{
 		mLock.readLock().lock();
 		try
 		{
-			return mTimeLimit;
+			return mExpireAfterAccess;
 		}
 		finally
 		{
@@ -225,14 +181,49 @@ public class Cache<K, V>
 
 
 	/**
-	 * @param aTimeLimit the maximum time an element may exist in the cache.
+	 * @param aExpireAfterAccess the maximum time an element may exist in the cache after accessed.
 	 */
-	public Cache<K, V> setTimeLimit(long aTimeLimit)
+	public Cache<K, V> setExpireAfterAccess(long aExpireAfterAccess)
 	{
 		mLock.writeLock().lock();
 		try
 		{
-			mTimeLimit = aTimeLimit;
+			mExpireAfterAccess = aExpireAfterAccess;
+			return this;
+		}
+		finally
+		{
+			mLock.writeLock().unlock();
+		}
+	}
+
+
+	/**
+	 * @return the write expiration time of elements, default is Long.MAX_VALUE.
+	 */
+	public long getExpireAfterWrite()
+	{
+		mLock.readLock().lock();
+		try
+		{
+			return mExpireAfterWrite;
+		}
+		finally
+		{
+			mLock.readLock().unlock();
+		}
+	}
+
+
+	/**
+	 * @param aExpireAfterWrite the maximum time an element may exist in the cache after written.
+	 */
+	public Cache<K, V> setExpireAfterWrite(long aExpireAfterWrite)
+	{
+		mLock.writeLock().lock();
+		try
+		{
+			mExpireAfterWrite = aExpireAfterWrite;
 			return this;
 		}
 		finally
@@ -245,12 +236,12 @@ public class Cache<K, V>
 	/**
 	 * @return the maximum number of elements in the map, default is Long.MAX_VALUE.
 	 */
-	public long getCountLimit()
+	public long getMaximumCount()
 	{
 		mLock.readLock().lock();
 		try
 		{
-			return mCountLimit;
+			return mMaximumCount;
 		}
 		finally
 		{
@@ -262,14 +253,14 @@ public class Cache<K, V>
 	/**
 	 * Sets the count limit of this Cache. Changing this value may cause elements to be evicted.
 	 *
-	 * @param aCountLimit maximum number of elements in the map.
+	 * @param aMaximumCount maximum number of elements in the map.
 	 */
-	public Cache<K, V> setCountLimit(long aCountLimit)
+	public Cache<K, V> setMaximumCount(long aMaximumCount)
 	{
 		mLock.writeLock().lock();
 		try
 		{
-			mCountLimit = aCountLimit;
+			mMaximumCount = aMaximumCount;
 			return this;
 		}
 		finally
@@ -282,12 +273,12 @@ public class Cache<K, V>
 	/**
 	 * @return the maximum weight of elements in the map, default is Long.MAX_VALUE.
 	 */
-	public long getWeightLimit()
+	public long getMaximumWeight()
 	{
 		mLock.readLock().lock();
 		try
 		{
-			return mWeightLimit;
+			return mMaximumWeight;
 		}
 		finally
 		{
@@ -299,21 +290,55 @@ public class Cache<K, V>
 	/**
 	 * Sets the weight limit of this Cache. Changing this value may cause elements to be evicted.
 	 *
-	 * @param aWeightLimit maximum weight of this map.
+	 * @param aMaximumWeight maximum weight of this map.
 	 */
-	public Cache<K, V> setWeightLimit(long aWeightLimit)
+	public Cache<K, V> setMaximumWeight(long aMaximumWeight)
 	{
 		mLock.writeLock().lock();
 		try
 		{
-			mWeightLimit = aWeightLimit;
-			shrinkImpl();
+			mMaximumWeight = aMaximumWeight;
+			trimInternal();
 		}
 		finally
 		{
 			mLock.writeLock().unlock();
 		}
 		return this;
+	}
+
+
+	public BiFunction<K, V, Long> getWeighter()
+	{
+		return mWeighter;
+	}
+
+
+	public Cache<K, V> setWeighter(BiFunction<K, V, Long> aWeighter)
+	{
+		mWeighter = aWeighter;
+		return this;
+	}
+
+
+	/**
+	 * Associates the specified value with the specified key in this map.
+	 * <p>
+	 * This method invokes the weighter to get the weight of an object if a maximum weight has been specified. Otherwise all items assumes
+	 * to have weight one.
+	 *
+	 * @param aKey Key with which the specified value is to be associated. Must not be null or zero length.
+	 * @param aValue Value to be associated with the specified key.
+	 * @return the previous value associated with specified key, or null if there was no mapping for key. A null return can also indicate
+	 * that the map previously associated null with the specified key.
+	 */
+	public V put(K aKey, V aValue)
+	{
+		if (mMaximumWeight < Long.MAX_VALUE)
+		{
+			return put(aKey, aValue, mWeighter.apply(aKey, aValue));
+		}
+		return put(aKey, aValue, 1);
 	}
 
 
@@ -331,32 +356,30 @@ public class Cache<K, V>
 		mLock.writeLock().lock();
 		try
 		{
+			Entry<K, V> entry = mMap.get(aKey);
 			V prevValue;
 
-			if (mMap.containsKey(aKey))
+			if (entry != null)
 			{
-				Entry<K, V> entry = mMap.remove(aKey);
-				mMap.put(aKey, entry);
-
-				prevValue = entry.value;
-
 				mWeight += aWeight - entry.weight;
-
-				entry.value = aValue;
-				entry.weight = aWeight;
-				entry.added = System.currentTimeMillis();
+				prevValue = entry.value;
+				if (mRemovalListener != null)
+				{
+					mRemovalListener.elementRemoved(aKey, prevValue, Cause.REPLACED);
+				}
 			}
 			else
 			{
+				entry = new Entry();
 				prevValue = null;
-
-				Entry entry = new Entry(aValue, aWeight);
-
 				mWeight += aWeight;
-				mMap.put(aKey, entry);
 			}
 
-			shrinkImpl();
+			entry.set(aValue, aWeight);
+
+			mMap.putLast(aKey, entry);
+
+			trimInternal();
 
 			return prevValue;
 		}
@@ -379,33 +402,21 @@ public class Cache<K, V>
 	 */
 	public V get(K aKey)
 	{
-		mLock.readLock().lock();
-		try
-		{
-			return getOrDefault(aKey, null);
-		}
-		finally
-		{
-			mLock.readLock().unlock();
-		}
+		return getOrDefault(aKey, null);
 	}
 
 
 	public V getOrDefault(K aKey, V aDefaultValue)
 	{
-		mLock.readLock().lock();
+		mLock.writeLock().lock();
 		try
 		{
-			Entry<K, V> entry = mMap.remove(aKey);
-
-//			if (entry == null && mElementProvider != null)
-//			{
-//				entry = mElementProvider.provide(aKey);
-//			}
+			Entry<K, V> entry = mMap.get(aKey);
 
 			if (entry != null)
 			{
-				mMap.put(aKey, entry);
+				entry.accessed = System.currentTimeMillis();
+				mMap.putLast(aKey, entry);
 				return entry.value;
 			}
 
@@ -413,7 +424,7 @@ public class Cache<K, V>
 		}
 		finally
 		{
-			mLock.readLock().unlock();
+			mLock.writeLock().unlock();
 		}
 	}
 
@@ -523,6 +534,24 @@ public class Cache<K, V>
 
 
 	/**
+	 * Performs trimming of the cache removing elements that has expired, are too large or too many.
+	 */
+	public Cache<K, V> trim()
+	{
+		mLock.writeLock().lock();
+		try
+		{
+			trimInternal();
+		}
+		finally
+		{
+			mLock.writeLock().unlock();
+		}
+		return this;
+	}
+
+
+	/**
 	 * @return the total weight of this map.
 	 */
 	public long getWeight()
@@ -549,7 +578,7 @@ public class Cache<K, V>
 		{
 			while (!mMap.isEmpty())
 			{
-				remove(mMap.keySet().iterator().next());
+				remove(getEldestEntry().getKey());
 			}
 
 			mWeight = 0;
@@ -572,6 +601,23 @@ public class Cache<K, V>
 		{
 			mWeight = 0;
 			mMap.clear();
+		}
+		finally
+		{
+			mLock.writeLock().unlock();
+		}
+	}
+
+
+	/**
+	 * Removes the eldest entry in the cache.
+	 */
+	public void removeEldest()
+	{
+		mLock.writeLock().lock();
+		try
+		{
+			removeImpl(getEldestEntry().getKey(), Cause.REMOVED);
 		}
 		finally
 		{
@@ -627,7 +673,7 @@ public class Cache<K, V>
 
 		if (entry == null)
 		{
-			throw new NoSuchElementException();
+			return null;
 		}
 
 		mWeight -= entry.weight;
@@ -641,47 +687,64 @@ public class Cache<K, V>
 	}
 
 
-	private int shrinkImpl()
+	private void trimInternal()
 	{
-		int count = 0;
-
-		while (mMap.size() > mCountLimit)
+		while (mMap.size() > mMaximumCount)
 		{
-			removeImpl(mMap.keySet().iterator().next(), Cause.COUNT);
-			count++;
+			removeImpl(getEldestEntry().getKey(), Cause.COUNT);
 		}
 
-		while (mWeight > mWeightLimit)
+		while (mWeight > mMaximumWeight)
 		{
-			removeImpl(mMap.keySet().iterator().next(), Cause.WEIGHT);
-			count++;
+			removeImpl(getEldestEntry().getKey(), Cause.WEIGHT);
 		}
 
-		if (mTimeLimit < Integer.MAX_VALUE)
+		if (mExpireAfterAccess < Integer.MAX_VALUE)
 		{
-			long threshold = System.currentTimeMillis() - mTimeLimit;
+			long threshold = System.currentTimeMillis() - mExpireAfterAccess;
 
 			while (!mMap.isEmpty())
 			{
-				K last = mMap.keySet().iterator().next();
-				Entry entry = mMap.get(last);
-				if (entry == null || entry.added > threshold)
+				Map.Entry<K, Entry<K, V>> last = getEldestEntry();
+				if (last.getValue().accessed > threshold)
 				{
 					break;
 				}
-				removeImpl(last, Cause.EXPIRED);
-				count++;
+				removeImpl(last.getKey(), Cause.EXPIRED);
 			}
 		}
 
-		return count;
+		if (mExpireAfterWrite < Integer.MAX_VALUE)
+		{
+			long threshold = System.currentTimeMillis() - mExpireAfterWrite;
+
+			while (!mMap.isEmpty())
+			{
+				Map.Entry<K, Entry<K, V>> last = getEldestEntry();
+				if (last.getValue().written > threshold)
+				{
+					break;
+				}
+				removeImpl(last.getKey(), Cause.EXPIRED);
+			}
+		}
+	}
+
+
+	/**
+	 * @return the eldest entry
+	 */
+	protected Map.Entry<K, Entry<K, V>> getEldestEntry()
+	{
+		return mMap.firstEntry();
 	}
 
 
 	public static class Entry<K, V>
 	{
 		protected V value;
-		protected long added;
+		protected long written;
+		protected long accessed;
 		protected long weight;
 
 
@@ -690,22 +753,22 @@ public class Cache<K, V>
 		}
 
 
-		public Entry(V aValue, long aWeight)
+		public void set(V aValue, long aWeight)
 		{
-			added = System.currentTimeMillis();
 			value = aValue;
 			weight = aWeight;
+			written = accessed = System.currentTimeMillis();
 		}
 
 
 		@Override
 		public String toString()
 		{
-			return "" + value;
+			return String.valueOf(value);
 		}
 	}
 
-	
+
 	public static void main(String... args)
 	{
 		try
@@ -713,10 +776,11 @@ public class Cache<K, V>
 			Cache<Integer, String> cache = new Cache<>();
 			cache
 				.startBackgroundWorker(4000)
-				.setCountLimit(15)
-				.setWeightLimit(5)
-				.setTimeLimit(3000)
-				.setReduceOverTimeEnabled(true)
+				.setMaximumCount(15)
+				.setMaximumWeight(5)
+				.setExpireAfterAccess(3000)
+				.setExpireAfterWrite(5000)
+				.setWeighter((k,v)->2L)
 //				.setElementProvider(new ElementProvider<Integer, String>()
 //				{
 //					@Override
@@ -741,7 +805,13 @@ public class Cache<K, V>
 						System.out.println("removed " + aCause + " " + aKey + "=" + aValue + ", " + cache.size() + ", " + cache.getWeight());
 					}
 				});
-			cache.put(1, "a", 2);
+			cache.put(1, "-0", 1);
+			cache.put(2, "-1", 1);
+			cache.put(3, "-2", 1);
+			cache.put(4, "-3", 1);
+			cache.put(5, "-4", 1);
+			cache.put(6, "-5", 1);
+
 			cache.put(2, "b", 4);
 			cache.get(1);
 			cache.get(4);
@@ -750,6 +820,7 @@ public class Cache<K, V>
 			Thread.sleep(3_000);
 			cache.put(3, "c", 2);
 			cache.put(4, "d", 3);
+			System.out.println(cache.put(3, "C", 2));
 			cache.put(5, "e", 4);
 			Thread.sleep(3_000);
 			cache.put(6, "f", 3);
