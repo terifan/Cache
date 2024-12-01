@@ -5,18 +5,18 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.NoSuchElementException;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.BiFunction;
+import java.util.function.Consumer;
+import java.util.function.Function;
 import org.terifan.util.cache.RemovalListener.Cause;
 
 
 /**
- * The class implements a cache with keys ordered in access order. The cache can have a weight, count and time limit per element.
- * Adding one item may result in multiple items being removed. A background worker can be started to automatically trim the cache from old
- * elements.
+ * The class implements a cache with keys ordered in access order. The cache can have a weight, count and time limit per element. Adding one
+ * item may result in multiple items being removed. A background worker can be started to automatically trim the cache from old elements.
  *
  * @param <K> the key type used by this cache
  * @param <V> the value type used by this cache
@@ -60,7 +60,7 @@ public class Cache<K, V>
 		mExpireAfterWrite = Long.MAX_VALUE;
 		mMaximumCount = Long.MAX_VALUE;
 		mMaximumWeight = Long.MAX_VALUE;
-		mWeighter = (K,V) -> 1L;
+		mWeighter = (K, V) -> 1L;
 
 		mMaximumWeight = aMaximumWeight;
 	}
@@ -390,6 +390,26 @@ public class Cache<K, V>
 	}
 
 
+	public V computeIfAbsent(K aKey, Function<K, V> aProvider)
+	{
+		mLock.writeLock().lock();
+		try
+		{
+			V item = get(aKey);
+			if (item == null)
+			{
+				item = aProvider.apply(aKey);
+				put(aKey, item);
+			}
+			return item;
+		}
+		finally
+		{
+			mLock.writeLock().unlock();
+		}
+	}
+
+
 	/**
 	 * Returns the value to which the specified key is mapped in this identity hash map, or null if the map contains no mapping for this
 	 * key. A return value of null does not necessarily indicate that the map contains no mapping for the key; it is also possible that the
@@ -406,7 +426,7 @@ public class Cache<K, V>
 	}
 
 
-	public V getOrDefault(K aKey, V aDefaultValue)
+	public V getOrDefault(K aKey, Function<K, V> aDefaultValue)
 	{
 		mLock.writeLock().lock();
 		try
@@ -419,8 +439,14 @@ public class Cache<K, V>
 				mMap.putLast(aKey, entry);
 				return entry.value;
 			}
+			if (aDefaultValue != null)
+			{
+				V value = aDefaultValue.apply(aKey);
+				put(aKey, value);
+				return value;
+			}
 
-			return aDefaultValue;
+			return null;
 		}
 		finally
 		{
@@ -780,23 +806,23 @@ public class Cache<K, V>
 				.setMaximumWeight(5)
 				.setExpireAfterAccess(3000)
 				.setExpireAfterWrite(5000)
-				.setWeighter((k,v)->2L)
-//				.setElementProvider(new ElementProvider<Integer, String>()
-//				{
-//					@Override
-//					public Entry<Integer, String> provide(Integer aKey)
-//					{
-//						return new Entry<>("#" + aKey, 1);
-//					}
-//				})
-//				.setRefreshListener(new RefreshListener<Integer, String>()
-//				{
-//					@Override
-//					public Entry<Integer, String> refresh(Integer aKey)
-//					{
-//						return new Entry<>("#"+aKey, 1);
-//					}
-//				})
+				.setWeighter((k, v) -> 2L)
+				//				.setElementProvider(new ElementProvider<Integer, String>()
+				//				{
+				//					@Override
+				//					public Entry<Integer, String> provide(Integer aKey)
+				//					{
+				//						return new Entry<>("#" + aKey, 1);
+				//					}
+				//				})
+				//				.setRefreshListener(new RefreshListener<Integer, String>()
+				//				{
+				//					@Override
+				//					public Entry<Integer, String> refresh(Integer aKey)
+				//					{
+				//						return new Entry<>("#"+aKey, 1);
+				//					}
+				//				})
 				.setRemovalListener(new RemovalListener<Integer, String>()
 				{
 					@Override
