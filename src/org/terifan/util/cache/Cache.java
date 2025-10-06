@@ -9,6 +9,7 @@ import java.util.Timer;
 import java.util.TimerTask;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.BiFunction;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import org.terifan.util.cache.RemovalListener.Cause;
 
@@ -389,15 +390,23 @@ public class Cache<K, V>
 	}
 
 
-	public V computeIfAbsent(K aKey, Function<K, V> aFunction)
+	public V computeIfAbsent(K aKey, Function<K, V> aProvider)
 	{
-		V v = get(aKey);
-		if (v == null)
+		mLock.writeLock().lock();
+		try
 		{
-			v = aFunction.apply(aKey);
-			put(aKey, v);
+			V item = get(aKey);
+			if (item == null)
+			{
+				item = aProvider.apply(aKey);
+				put(aKey, item);
+			}
+			return item;
 		}
-		return v;
+		finally
+		{
+			mLock.writeLock().unlock();
+		}
 	}
 
 
@@ -417,7 +426,7 @@ public class Cache<K, V>
 	}
 
 
-	public V getOrDefault(K aKey, V aDefaultValue)
+	public V getOrDefault(K aKey, Function<K, V> aDefaultValue)
 	{
 		mLock.writeLock().lock();
 		try
@@ -430,8 +439,14 @@ public class Cache<K, V>
 				mMap.putLast(aKey, entry);
 				return entry.value;
 			}
+			if (aDefaultValue != null)
+			{
+				V value = aDefaultValue.apply(aKey);
+				put(aKey, value);
+				return value;
+			}
 
-			return aDefaultValue;
+			return null;
 		}
 		finally
 		{
