@@ -5,18 +5,17 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.NoSuchElementException;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.BiFunction;
+import java.util.function.Function;
 import org.terifan.util.cache.RemovalListener.Cause;
 
 
 /**
- * The class implements a cache with keys ordered in access order. The cache can have a weight, count and time limit per element.
- * Adding one item may result in multiple items being removed. A background worker can be started to automatically trim the cache from old
- * elements.
+ * The class implements a cache with keys ordered in access order. The cache can have a weight, count and time limit per element. Adding one
+ * item may result in multiple items being removed. A background worker can be started to automatically trim the cache from old elements.
  *
  * @param <K> the key type used by this cache
  * @param <V> the value type used by this cache
@@ -60,7 +59,7 @@ public class Cache<K, V>
 		mExpireAfterWrite = Long.MAX_VALUE;
 		mMaximumCount = Long.MAX_VALUE;
 		mMaximumWeight = Long.MAX_VALUE;
-		mWeighter = (K,V) -> 1L;
+		mWeighter = (K, V) -> 1L;
 
 		mMaximumWeight = aMaximumWeight;
 	}
@@ -387,6 +386,18 @@ public class Cache<K, V>
 		{
 			mLock.writeLock().unlock();
 		}
+	}
+
+
+	public V computeIfAbsent(K aKey, Function<K, V> aFunction)
+	{
+		V v = get(aKey);
+		if (v == null)
+		{
+			v = aFunction.apply(aKey);
+			put(aKey, v);
+		}
+		return v;
 	}
 
 
@@ -780,23 +791,23 @@ public class Cache<K, V>
 				.setMaximumWeight(5)
 				.setExpireAfterAccess(3000)
 				.setExpireAfterWrite(5000)
-				.setWeighter((k,v)->2L)
-//				.setElementProvider(new ElementProvider<Integer, String>()
-//				{
-//					@Override
-//					public Entry<Integer, String> provide(Integer aKey)
-//					{
-//						return new Entry<>("#" + aKey, 1);
-//					}
-//				})
-//				.setRefreshListener(new RefreshListener<Integer, String>()
-//				{
-//					@Override
-//					public Entry<Integer, String> refresh(Integer aKey)
-//					{
-//						return new Entry<>("#"+aKey, 1);
-//					}
-//				})
+				.setWeighter((k, v) -> 2L)
+				//				.setElementProvider(new ElementProvider<Integer, String>()
+				//				{
+				//					@Override
+				//					public Entry<Integer, String> provide(Integer aKey)
+				//					{
+				//						return new Entry<>("#" + aKey, 1);
+				//					}
+				//				})
+				//				.setRefreshListener(new RefreshListener<Integer, String>()
+				//				{
+				//					@Override
+				//					public Entry<Integer, String> refresh(Integer aKey)
+				//					{
+				//						return new Entry<>("#"+aKey, 1);
+				//					}
+				//				})
 				.setRemovalListener(new RemovalListener<Integer, String>()
 				{
 					@Override
