@@ -9,7 +9,6 @@ import java.util.Timer;
 import java.util.TimerTask;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.BiFunction;
-import java.util.function.Consumer;
 import java.util.function.Function;
 import org.terifan.util.cache.RemovalListener.Cause;
 
@@ -53,6 +52,11 @@ public class Cache<K, V>
 	 */
 	public Cache(long aMaximumWeight)
 	{
+		if (aMaximumWeight < 0)
+		{
+			throw new IllegalArgumentException("maximum weight must not be negative");
+		}
+
 		mLock = new ReentrantReadWriteLock();
 		mMap = new LinkedHashMap<>();
 
@@ -67,7 +71,10 @@ public class Cache<K, V>
 
 
 	/**
-	 * Start removing old elements every five seconds.
+	 * Start worker thread that remove expired elements.
+	 *
+	 * @param aRate
+	 *   number of milliseconds between each clean-up run
 	 */
 	public Cache<K, V> startBackgroundWorker(int aRate)
 	{
@@ -118,6 +125,7 @@ public class Cache<K, V>
 			if (mTimerTask != null)
 			{
 				mTimerTask.cancel();
+				mTimerTask = null;
 			}
 		}
 		finally
@@ -185,6 +193,11 @@ public class Cache<K, V>
 	 */
 	public Cache<K, V> setExpireAfterAccess(long aExpireAfterAccess)
 	{
+		if (aExpireAfterAccess < 0)
+		{
+			throw new IllegalArgumentException("expiration time must not be negative");
+		}
+
 		mLock.writeLock().lock();
 		try
 		{
@@ -220,6 +233,11 @@ public class Cache<K, V>
 	 */
 	public Cache<K, V> setExpireAfterWrite(long aExpireAfterWrite)
 	{
+		if (aExpireAfterWrite < 0)
+		{
+			throw new IllegalArgumentException("expiration time must not be negative");
+		}
+
 		mLock.writeLock().lock();
 		try
 		{
@@ -257,10 +275,16 @@ public class Cache<K, V>
 	 */
 	public Cache<K, V> setMaximumCount(long aMaximumCount)
 	{
+		if (aMaximumCount < 0)
+		{
+			throw new IllegalArgumentException("maximum count must not be negative");
+		}
+
 		mLock.writeLock().lock();
 		try
 		{
 			mMaximumCount = aMaximumCount;
+			trimInternal();
 			return this;
 		}
 		finally
@@ -294,6 +318,11 @@ public class Cache<K, V>
 	 */
 	public Cache<K, V> setMaximumWeight(long aMaximumWeight)
 	{
+		if (aMaximumWeight < 0)
+		{
+			throw new IllegalArgumentException("maximum weight must not be negative");
+		}
+
 		mLock.writeLock().lock();
 		try
 		{
@@ -310,14 +339,30 @@ public class Cache<K, V>
 
 	public BiFunction<K, V, Long> getWeighter()
 	{
-		return mWeighter;
+		mLock.readLock().lock();
+		try
+		{
+			return mWeighter;
+		}
+		finally
+		{
+			mLock.readLock().unlock();
+		}
 	}
 
 
 	public Cache<K, V> setWeighter(BiFunction<K, V, Long> aWeighter)
 	{
-		mWeighter = aWeighter;
-		return this;
+		mLock.writeLock().lock();
+		try
+		{
+			mWeighter = aWeighter;
+			return this;
+		}
+		finally
+		{
+			mLock.writeLock().unlock();
+		}
 	}
 
 
@@ -334,11 +379,25 @@ public class Cache<K, V>
 	 */
 	public V put(K aKey, V aValue)
 	{
-		if (mMaximumWeight < Long.MAX_VALUE)
+		mLock.writeLock().lock();
+		try
 		{
-			return put(aKey, aValue, mWeighter.apply(aKey, aValue));
+			long weight = 1;
+			if (mMaximumWeight < Long.MAX_VALUE)
+			{
+				Long calculatedWeight = mWeighter.apply(aKey, aValue);
+				if (calculatedWeight == null)
+				{
+					throw new IllegalStateException("weighter returned null");
+				}
+				weight = calculatedWeight;
+			}
+			return put(aKey, aValue, weight);
 		}
-		return put(aKey, aValue, 1);
+		finally
+		{
+			mLock.writeLock().unlock();
+		}
 	}
 
 
@@ -353,6 +412,11 @@ public class Cache<K, V>
 	 */
 	public V put(K aKey, V aValue, long aWeight)
 	{
+		if (aWeight < 0)
+		{
+			throw new IllegalArgumentException("weight must not be negative");
+		}
+
 		mLock.writeLock().lock();
 		try
 		{
@@ -370,7 +434,7 @@ public class Cache<K, V>
 			}
 			else
 			{
-				entry = new Entry();
+				entry = new Entry<>();
 				prevValue = null;
 				mWeight += aWeight;
 			}
@@ -491,12 +555,7 @@ public class Cache<K, V>
 		mLock.readLock().lock();
 		try
 		{
-			boolean b = mMap.containsKey(aKey);
-			if (b)
-			{
-				mMap.put(aKey, mMap.remove(aKey));
-			}
-			return b;
+			return mMap.containsKey(aKey);
 		}
 		finally
 		{
@@ -689,7 +748,20 @@ public class Cache<K, V>
 	@Override
 	public String toString()
 	{
-		return mMap.toString();
+		Map<K, V> snapshot = new LinkedHashMap<>();
+		mLock.readLock().lock();
+		try
+		{
+			for (Map.Entry<K, Entry<K, V>> entry : mMap.entrySet())
+			{
+				snapshot.put(entry.getKey(), entry.getValue().value);
+			}
+		}
+		finally
+		{
+			mLock.readLock().unlock();
+		}
+		return snapshot.toString();
 	}
 
 
@@ -725,14 +797,14 @@ public class Cache<K, V>
 			removeImpl(getEldestEntry().getKey(), Cause.WEIGHT);
 		}
 
-		if (mExpireAfterAccess < Integer.MAX_VALUE)
-		{
-			long threshold = System.currentTimeMillis() - mExpireAfterAccess;
+		long now = System.currentTimeMillis();
 
+		if (mExpireAfterAccess != Long.MAX_VALUE)
+		{
 			while (!mMap.isEmpty())
 			{
 				Map.Entry<K, Entry<K, V>> last = getEldestEntry();
-				if (last.getValue().accessed > threshold)
+				if (now - last.getValue().accessed < mExpireAfterAccess)
 				{
 					break;
 				}
@@ -740,18 +812,19 @@ public class Cache<K, V>
 			}
 		}
 
-		if (mExpireAfterWrite < Integer.MAX_VALUE)
+		if (mExpireAfterWrite != Long.MAX_VALUE)
 		{
-			long threshold = System.currentTimeMillis() - mExpireAfterWrite;
-
-			while (!mMap.isEmpty())
+			List<K> expiredKeys = new ArrayList<>();
+			for (Map.Entry<K, Entry<K, V>> entry : mMap.entrySet())
 			{
-				Map.Entry<K, Entry<K, V>> last = getEldestEntry();
-				if (last.getValue().written > threshold)
+				if (now - entry.getValue().written >= mExpireAfterWrite)
 				{
-					break;
+					expiredKeys.add(entry.getKey());
 				}
-				removeImpl(last.getKey(), Cause.EXPIRED);
+			}
+			for (K key : expiredKeys)
+			{
+				removeImpl(key, Cause.EXPIRED);
 			}
 		}
 	}
@@ -791,76 +864,6 @@ public class Cache<K, V>
 		public String toString()
 		{
 			return String.valueOf(value);
-		}
-	}
-
-
-	public static void main(String... args)
-	{
-		try
-		{
-			Cache<Integer, String> cache = new Cache<>();
-			cache
-				.startBackgroundWorker(4000)
-				.setMaximumCount(15)
-				.setMaximumWeight(5)
-				.setExpireAfterAccess(3000)
-				.setExpireAfterWrite(5000)
-				.setWeighter((k, v) -> 2L)
-				//				.setElementProvider(new ElementProvider<Integer, String>()
-				//				{
-				//					@Override
-				//					public Entry<Integer, String> provide(Integer aKey)
-				//					{
-				//						return new Entry<>("#" + aKey, 1);
-				//					}
-				//				})
-				//				.setRefreshListener(new RefreshListener<Integer, String>()
-				//				{
-				//					@Override
-				//					public Entry<Integer, String> refresh(Integer aKey)
-				//					{
-				//						return new Entry<>("#"+aKey, 1);
-				//					}
-				//				})
-				.setRemovalListener(new RemovalListener<Integer, String>()
-				{
-					@Override
-					public void elementRemoved(Integer aKey, String aValue, Cause aCause)
-					{
-						System.out.println("removed " + aCause + " " + aKey + "=" + aValue + ", " + cache.size() + ", " + cache.getWeight());
-					}
-				});
-			cache.put(1, "-0", 1);
-			cache.put(2, "-1", 1);
-			cache.put(3, "-2", 1);
-			cache.put(4, "-3", 1);
-			cache.put(5, "-4", 1);
-			cache.put(6, "-5", 1);
-
-			cache.put(2, "b", 4);
-			cache.get(1);
-			cache.get(4);
-			cache.put(1, "A", 3);
-			System.out.println(cache);
-			Thread.sleep(3_000);
-			cache.put(3, "c", 2);
-			cache.put(4, "d", 3);
-			System.out.println(cache.put(3, "C", 2));
-			cache.put(5, "e", 4);
-			Thread.sleep(3_000);
-			cache.put(6, "f", 3);
-			cache.put(7, "g", 2);
-			Thread.sleep(3_000);
-			cache.put(8, "h", 4);
-			cache.put(9, "i", 1);
-			cache.remove(8);
-
-			Thread.sleep(10_000);
-		}
-		catch (Throwable e)
-		{
-			e.printStackTrace(System.out);
 		}
 	}
 }
