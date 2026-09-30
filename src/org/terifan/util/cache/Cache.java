@@ -71,7 +71,10 @@ public class Cache<K, V>
 
 
 	/**
-	 * Start removing old elements every five seconds.
+	 * Start worker thread that remove expired elements.
+	 *
+	 * @param aRate
+	 *   number of milliseconds between each clean-up run
 	 */
 	public Cache<K, V> startBackgroundWorker(int aRate)
 	{
